@@ -1,0 +1,84 @@
+name: News Fetcher Workflow
+
+on:
+  schedule:
+    - cron: '0 5 * * *'   # Runs at 6 AM CET (5 AM UTC)
+    - cron: '0 10 * * *'   # Runs at 11 AM CET (10 AM UTC)
+    - cron: '0 14 * * *'  # Runs at 3 PM CDT (2 PM UTC)
+    - cron: '0 18 * * *'  # Runs at 7 PM EDT (6 PM UTC)
+  workflow_dispatch:
+
+jobs:
+  fetch_and_update_news:
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+          cache: pip
+      - run: pip install -r requirements.txt
+
+      - name: Fetch News and Process Data
+        env:
+          NEWS_DATA_API_KEY: ${{ secrets.NEWS_DATA_API_KEY }}
+          STABILITY_API_KEY: ${{ secrets.STABILITY_API_KEY }}
+          API_HOST: 'https://api.stability.ai'
+        run: |
+          python ./news_fetcher.py
+          python ./check_for_dupes.py
+
+      - name: Commit and Push Changes
+        run: |
+          git stash || true
+          git pull -r
+          git stash pop || true
+          git config --local user.email "santiago@gomu.cloud"
+          git config --local user.name "Santiago Quintero"
+          git add .
+          git commit -m "auto: Update news articles and images" || echo "No changes to commit"
+          git push || true
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: fetch_and_update_news
+    timeout-minutes: 5
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Update local
+        run: |
+          sleep 10
+          git stash || true
+          git pull -r
+          git stash pop || true
+          git status
+      - name: Package everything
+        run: ./package-shit.sh
+      - name: Deploy to S3
+        uses: jakejarvis/s3-sync-action@master
+        with:
+          args: --follow-symlinks
+        env:
+          AWS_S3_BUCKET: ${{ secrets.AWS_S3_BUCKET }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          SOURCE_DIR: "dist"
+
+  invalidate:
+    timeout-minutes: 5
+    needs: deploy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Invalidate CloudFront
+        uses: chetan/invalidate-cloudfront-action@v2
+        env:
+          DISTRIBUTION: ${{ secrets.CLOUDFRONT_DISTRIBUTION }}
+          PATHS: "/*"
+          AWS_REGION: ${{ secrets.AWS_REGION }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
